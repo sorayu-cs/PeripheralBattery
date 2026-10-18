@@ -1,0 +1,13 @@
+bin/
+obj/
+dist/
+package/
+_verify/
+_testpkg/
+build/
+*.user
+*.suo
+.vs/
+*.zip
+*.png
+!src/PeripheralBattery/app.ico
