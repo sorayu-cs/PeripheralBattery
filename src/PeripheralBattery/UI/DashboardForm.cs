@@ -16,12 +16,15 @@ public sealed class DashboardForm : Form
     private readonly DeviceBatteryService _service;
     private readonly Action _openSettings;
     private readonly Action _exit;
-    private readonly FlowLayoutPanel _cardsPanel;
+    private readonly CardsPanel _cardsPanel;
     private readonly Label _updated;
     private readonly Label _subtitle;
     private readonly System.Windows.Forms.Timer _timer;
+    private readonly System.Windows.Forms.Timer _chargeTimer;
     private bool _busy;
     private bool _closingToTray;
+    private string _lastSignature = "";
+    private bool _autoSized;
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
@@ -34,8 +37,8 @@ public sealed class DashboardForm : Form
         _exit = exit;
 
         Text = "外设电量";
-        ClientSize = new Size(720, 580);
-        MinimumSize = new Size(600, 460);
+        ClientSize = new Size(720, 680);
+        MinimumSize = new Size(600, 500);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = BackColorDark;
         ForeColor = TextMain;
@@ -60,8 +63,8 @@ public sealed class DashboardForm : Form
         _subtitle = new Label
         {
             Text = _config.RefreshSeconds < 60
-                ? $"2.4G 无线外设 · 每 {Math.Max(1, _config.RefreshSeconds)} 秒自动刷新"
-                : $"2.4G 无线外设 · 每 {Math.Max(1, _config.RefreshSeconds / 60)} 分钟自动刷新",
+                ? $"2.4G / 蓝牙外设 · 每 {Math.Max(1, _config.RefreshSeconds)} 秒自动刷新"
+                : $"2.4G / 蓝牙外设 · 每 {Math.Max(1, _config.RefreshSeconds / 60)} 分钟自动刷新",
             AutoSize = true,
             Font = new Font("Microsoft YaHei UI", 9f),
             ForeColor = TextSub,
@@ -70,16 +73,12 @@ public sealed class DashboardForm : Form
         topPanel.Controls.Add(title);
         topPanel.Controls.Add(_subtitle);
 
-        _cardsPanel = new FlowLayoutPanel
+        _cardsPanel = new CardsPanel
         {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            AutoScroll = true,
-            BackColor = BackColorDark,
-            Padding = new Padding(16, 8, 16, 8)
+            Dock = DockStyle.Fill
         };
-        _cardsPanel.Resize += (_, _) => ResizeCards();
+        _cardsPanel.Content.Padding = new Padding(16, 8, 16, 8);
+        _cardsPanel.Content.Resize += (_, _) => ResizeCards();
 
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 56, BackColor = BarColor };
 
@@ -129,12 +128,60 @@ public sealed class DashboardForm : Form
         };
         ScheduleNextRefresh();
 
+        // 充电状态高频轮询：插拔线后 2 秒内切换显示
+        _chargeTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        _chargeTimer.Tick += async (_, _) => await PollChargingAsync();
+
         Shown += (_, _) =>
         {
             ResizeCards();
             RefreshReadings();
+            _chargeTimer.Start();
         };
         Resize += (_, _) => ResizeCards();
+    }
+
+    /// <summary>2 秒轮询：电量/充电状态直接更新卡片；连接模式变化（2.4G ↔ 蓝牙）时重建卡片。</summary>
+    private async Task PollChargingAsync()
+    {
+        if (_busy || IsDisposed || !Visible) return;
+        _busy = true;
+        try
+        {
+            var readings = await Task.Run(() =>
+                _config.Devices.Where(d => d.Enabled)
+                    .Select(d => (Device: d, Reading: _service.Read(d)))
+                    .ToList());
+            var bluetooth = await Task.Run(() => BluetoothBattery.Discover());
+
+            var signature = BuildSignature(readings, bluetooth);
+            if (signature != _lastSignature)
+            {
+                _lastSignature = signature;
+                RebuildCards(readings, bluetooth);
+                return;
+            }
+
+            foreach (var card in _cardsPanel.Content.Controls.OfType<DeviceCard>())
+            {
+                var match = readings.FirstOrDefault(r => ReferenceEquals(r.Device, card.Device));
+                if (match.Reading != null) card.Update(match.Reading);
+            }
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private static string BuildSignature(
+        IReadOnlyList<(DeviceProfile Device, BatteryReading Reading)> readings,
+        IReadOnlyList<BluetoothBatteryInfo> bluetooth)
+    {
+        // 包含“断开”状态（切换 2.4G/蓝牙时变化），但不包含休眠状态，
+        // 这样切换模式会立即重建卡片，鼠标休眠时又不会反复闪烁。
+        var parts = readings.Select(r => $"{r.Device.Name}|{r.Reading.Disconnected}");
+        return string.Join(";", parts) + "||" + string.Join(";", bluetooth.Select(b => b.Name));
     }
 
     /// <summary>把下一次自动刷新对齐到整分（或间隔的整数倍），手动刷新不影响这个节奏。</summary>
@@ -186,8 +233,8 @@ public sealed class DashboardForm : Form
 
     private void ResizeCards()
     {
-        var width = Math.Max(360, _cardsPanel.ClientSize.Width - 36);
-        foreach (Control control in _cardsPanel.Controls)
+        var width = Math.Max(360, _cardsPanel.Width - 52);
+        foreach (Control control in _cardsPanel.Content.Controls)
         {
             control.Width = width;
         }
@@ -202,7 +249,9 @@ public sealed class DashboardForm : Form
         try
         {
             var results = await Task.Run(() => _service.ReadAll(_config.Devices));
-            RebuildCards(results);
+            var bluetooth = await Task.Run(() => BluetoothBattery.Discover());
+            _lastSignature = BuildSignature(results, bluetooth);
+            RebuildCards(results, bluetooth);
             _updated.Text = "上次更新 " + DateTime.Now.ToString("HH:mm:ss");
         }
         catch (Exception ex)
@@ -215,21 +264,46 @@ public sealed class DashboardForm : Form
         }
     }
 
-    private void RebuildCards(IReadOnlyList<(DeviceProfile Device, BatteryReading Reading)> results)
+    private void RebuildCards(IReadOnlyList<(DeviceProfile Device, BatteryReading Reading)> results,
+        IReadOnlyList<BluetoothBatteryInfo> bluetooth)
     {
-        _cardsPanel.SuspendLayout();
-        _cardsPanel.Controls.Clear();
+        _cardsPanel.Content.SuspendLayout();
+        _cardsPanel.Content.Controls.Clear();
+        var width = Math.Max(360, _cardsPanel.Width - 52);
+
         foreach (var (device, reading) in results)
         {
-            _cardsPanel.Controls.Add(new DeviceCard(device, reading)
-            {
-                Width = Math.Max(360, _cardsPanel.ClientSize.Width - 36)
-            });
+            // 同一设备已连接蓝牙且 2.4G 读不到（切到蓝牙模式）时，只保留蓝牙卡片
+            var hasBluetooth = bluetooth.Any(bt => DeviceMatcher.SameDevice(device.Name, bt.Name));
+            if (hasBluetooth && (!reading.Ok || reading.Disconnected)) continue;
+
+            _cardsPanel.Content.Controls.Add(new DeviceCard(device, reading) { Width = width });
         }
 
-        if (results.Count == 0)
+        // 2.4G 读取成功时优先显示 2.4G，不再重复显示同一设备的蓝牙卡片
+        foreach (var bt in bluetooth)
         {
-            _cardsPanel.Controls.Add(new Label
+            if (results.Any(r => r.Reading.Ok && !r.Reading.Disconnected &&
+                                 DeviceMatcher.SameDevice(r.Device.Name, bt.Name)))
+                continue;
+
+            var device = new DeviceProfile
+            {
+                Name = bt.Name,
+                Protocol = "bluetooth"
+            };
+            var reading = new BatteryReading
+            {
+                Percent = bt.Percent,
+                Charging = bt.Charging,
+                Source = $"蓝牙 GATT · {bt.Percent}%"
+            };
+            _cardsPanel.Content.Controls.Add(new DeviceCard(device, reading) { Width = width });
+        }
+
+        if (_cardsPanel.Content.Controls.Count == 0)
+        {
+            _cardsPanel.Content.Controls.Add(new Label
             {
                 Text = "还没有设备，点“设置”添加一台。",
                 AutoSize = true,
@@ -238,11 +312,33 @@ public sealed class DashboardForm : Form
             });
         }
 
-        _cardsPanel.ResumeLayout();
+        _cardsPanel.Content.ResumeLayout();
+        _cardsPanel.UpdateScroll();
+        FitToContent();
+    }
+
+    /// <summary>首次显示时把窗口高度调整到刚好显示全部卡片（不出现滚动条）。</summary>
+    private void FitToContent()
+    {
+        if (_autoSized) return;
+
+        var cards = 0;
+        foreach (Control card in _cardsPanel.Content.Controls)
+            cards += card.Height + card.Margin.Top + card.Margin.Bottom;
+        cards += _cardsPanel.Content.Padding.Top + _cardsPanel.Content.Padding.Bottom;
+
+        var chrome = Math.Max(Height - ClientSize.Height, 20);
+        var needed = 92 + 56 + cards + chrome + 4;
+        var max = Screen.FromControl(this).WorkingArea.Height - 40;
+
+        Height = Math.Min(Math.Max(needed, MinimumSize.Height), max);
+        _autoSized = true;
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        _chargeTimer.Stop();
+
         if (!_closingToTray && e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;

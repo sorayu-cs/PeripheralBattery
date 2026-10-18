@@ -62,7 +62,9 @@ public sealed class DeviceBatteryService
                 return reading;
             }
 
-            // 设备断开/休眠时保留最后一次成功读数，并标注断开时间
+            // 设备断开时保留最后一次成功读数。
+            // 罗技休眠已由协议层返回“（休眠）”且 Ok=true，不会走到这里；
+            // 其余“未响应”一律按断开处理，保证键盘切蓝牙时能触发卡片重建。
             if (_lastGood.TryGetValue(key, out var last))
             {
                 return new BatteryReading

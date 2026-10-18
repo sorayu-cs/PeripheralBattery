@@ -69,6 +69,15 @@ public sealed class DeviceCard : Control
             g.DrawString(Trim(source, 52), subFont, subBrush, 26, 55);
         }
 
+        if (_reading.Charging == true)
+        {
+            using var chargeFont = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold);
+            using var chargeBrush = new SolidBrush(Color.FromArgb(52, 211, 153));
+            const string chargeText = "⚡ 充电中";
+            var chargeSize = g.MeasureString(chargeText, chargeFont);
+            g.DrawString(chargeText, chargeFont, chargeBrush, Width - 26 - chargeSize.Width, 54);
+        }
+
         var percent = _reading.Percent;
         var text = percent?.ToString() ?? "--";
         using (var pctFont = new Font("Segoe UI", 30f, FontStyle.Bold))
@@ -89,6 +98,7 @@ public sealed class DeviceCard : Control
 
     private string DeviceTypeLabel()
     {
+        if (_device.Protocol == "bluetooth") return "蓝牙设备";
         if (_device.Protocol == "logitech_hidpp") return "无线鼠标";
         if (_device.Protocol == "mchose_qhw") return "无线键盘";
         if (_device.Name.Contains("鼠标")) return "无线鼠标";

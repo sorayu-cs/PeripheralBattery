@@ -112,7 +112,7 @@ public sealed class HidDevice : IDisposable
                 var task = _readStream!.ReadAsync(buf, 0, length, cts.Token);
                 if (!task.Wait(timeoutMs + 40))
                 {
-                    ResetReader();
+                    // 超时保留读流，响应可能稍后才到达（罗技 HID++ 需要连续读取）
                     return null;
                 }
 

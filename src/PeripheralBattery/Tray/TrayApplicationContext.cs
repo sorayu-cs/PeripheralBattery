@@ -18,6 +18,8 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly HiddenMessageWindow _showSettingsWindow;
     private readonly SynchronizationContext _uiContext;
     private List<(DeviceProfile Device, BatteryReading Reading)> _readings = new();
+    private List<BluetoothBatteryInfo> _bluetooth = new();
+    private List<(string Name, BatteryReading Reading)> _display = new();
     private bool _refreshing;
     private bool _exiting;
     private SettingsForm? _settings;
@@ -27,7 +29,15 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         _config = config;
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
-        _menu = new ContextMenuStrip();
+        _menu = new ContextMenuStrip
+        {
+            Renderer = new DarkMenuRenderer(),
+            ShowImageMargin = false,
+            BackColor = Color.FromArgb(31, 32, 36),
+            ForeColor = Color.FromArgb(230, 231, 234),
+            Padding = new Padding(0, 4, 0, 4),
+            Font = new Font("Microsoft YaHei UI", 9f)
+        };
         _notifyIcon = new NotifyIcon
         {
             Icon = IconFactory.Create(null, null),
@@ -38,7 +48,11 @@ public sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.MouseClick += OnIconClick;
         _notifyIcon.DoubleClick += (_, _) => OpenDashboard();
 
-        _timer = new System.Windows.Forms.Timer { Interval = Math.Max(30, _config.RefreshSeconds) * 1000 };
+        // 托盘比面板更新更勤，连接模式切换时图标能尽快跟上
+        _timer = new System.Windows.Forms.Timer
+        {
+            Interval = Math.Min(Math.Max(10, _config.RefreshSeconds), 15) * 1000
+        };
         _timer.Tick += (_, _) => Refresh();
         _timer.Start();
 
@@ -100,10 +114,12 @@ public sealed class TrayApplicationContext : ApplicationContext
         Task.Run(() =>
         {
             var readings = _service.ReadAll(_config.Devices);
+            var bluetooth = BluetoothBattery.Discover();
             if (_exiting) return;
             _uiContext.Post(_ =>
             {
                 _readings = readings;
+                _bluetooth = bluetooth;
                 ApplyReadings();
                 _refreshing = false;
             }, null);
@@ -112,16 +128,18 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void ApplyReadings()
     {
-        // 外环显示第一台设备，内环显示第二台设备
-        var first = _readings.Count > 0 ? _readings[0].Reading.Percent : null;
-        var second = _readings.Count > 1 ? _readings[1].Reading.Percent : null;
+        _display = BuildDisplay();
+
+        // 外环显示第一台设备，内环显示第二台设备（2.4G 或蓝牙，与主面板一致）
+        var first = _display.Count > 0 ? _display[0].Reading.Percent : null;
+        var second = _display.Count > 1 ? _display[1].Reading.Percent : null;
 
         var oldIcon = _notifyIcon.Icon;
         _notifyIcon.Icon = IconFactory.Create(first, second);
         oldIcon?.Dispose();
 
-        var lines = _readings.Select(r =>
-            $"{r.Device.Name}：{(r.Reading.Ok ? r.Reading.Percent + "%" : "未连接")}");
+        var lines = _display.Select(d =>
+            $"{d.Name}：{(d.Reading.Ok ? d.Reading.Percent + "%" : "未连接")}");
         var text = string.Join("  |  ", lines);
         if (text.Length > 120) text = text[..120];
         _notifyIcon.Text = string.IsNullOrWhiteSpace(text) ? "外设电量监控" : text;
@@ -129,11 +147,47 @@ public sealed class TrayApplicationContext : ApplicationContext
         RebuildMenu();
     }
 
+    /// <summary>与主面板相同的显示规则：2.4G 优先，读不到时用同一设备的蓝牙电量。</summary>
+    private List<(string Name, BatteryReading Reading)> BuildDisplay()
+    {
+        var list = new List<(string Name, BatteryReading Reading)>();
+
+        foreach (var (device, reading) in _readings)
+        {
+            var bt = _bluetooth.FirstOrDefault(b => DeviceMatcher.SameDevice(device.Name, b.Name));
+            if (bt != null && (!reading.Ok || reading.Disconnected))
+            {
+                list.Add((bt.Name, new BatteryReading
+                {
+                    Percent = bt.Percent,
+                    Charging = bt.Charging,
+                    Source = "蓝牙 GATT"
+                }));
+                continue;
+            }
+
+            list.Add((device.Name, reading));
+        }
+
+        foreach (var bt in _bluetooth)
+        {
+            if (list.Any(d => DeviceMatcher.SameDevice(d.Name, bt.Name))) continue;
+            list.Add((bt.Name, new BatteryReading
+            {
+                Percent = bt.Percent,
+                Charging = bt.Charging,
+                Source = "蓝牙 GATT"
+            }));
+        }
+
+        return list;
+    }
+
     private void ShowBalloon()
     {
         if (!_config.ShowNotifications) return;
-        var text = string.Join("\n", _readings.Select(r =>
-            $"{r.Device.Name}：{(r.Reading.Ok ? r.Reading.Describe() : r.Reading.Error ?? "未连接")}"));
+        var text = string.Join("\n", _display.Select(d =>
+            $"{d.Name}：{(d.Reading.Ok ? d.Reading.Describe() : d.Reading.Error ?? "未连接")}"));
         if (string.IsNullOrWhiteSpace(text)) text = "尚未读取到设备";
         _notifyIcon.BalloonTipTitle = "外设电量";
         _notifyIcon.BalloonTipText = text;
@@ -151,17 +205,17 @@ public sealed class TrayApplicationContext : ApplicationContext
         dashboard.Click += (_, _) => OpenDashboard();
         _menu.Items.Add(dashboard);
 
-        foreach (var (device, reading) in _readings)
+        foreach (var (name, reading) in _display)
         {
             var label = reading.Ok
-                ? $"{device.Name}：{reading.Percent}%" + (reading.Charging == true ? "（充电中）" : "")
-                : $"{device.Name}：{reading.Error ?? "未连接"}";
+                ? $"{name}：{reading.Percent}%" + (reading.Charging == true ? "（充电中）" : "")
+                : $"{name}：{reading.Error ?? "未连接"}";
             var item = new ToolStripMenuItem(label);
             item.Click += (_, _) => Refresh();
             _menu.Items.Add(item);
         }
 
-        if (_readings.Count == 0)
+        if (_display.Count == 0)
         {
             _menu.Items.Add(new ToolStripMenuItem("（尚未读取）") { Enabled = false });
         }
@@ -236,7 +290,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _settings.FormClosed += (_, _) =>
         {
             _settings = null;
-            _timer.Interval = Math.Max(30, _config.RefreshSeconds) * 1000;
+            _timer.Interval = Math.Min(Math.Max(10, _config.RefreshSeconds), 15) * 1000;
             Refresh();
         };
         _settings.Show();

@@ -32,54 +32,33 @@ public sealed class MchoseQhwProtocol : IBatteryProtocol
         {
             using var dev = new HidDevice(target.Path, target.InputLen, target.OutputLen, target.FeatureLen);
 
-            // 优先读 0x05 状态帧：第 31 字节是随电量变化的原始值（85/86…），
-            // M HUB 会把它按 10% 分档显示（85-94 → 90%）。
+            // 优先读 0x05 状态帧：data 段第 31 字节低 7 位是电量（85/86…），bit7 是充电标志
+            // （未充电 0x55，充电中 0xD5）；data 段从完整帧的偏移 10 开始。
             var status = Query(dev, 0x05, target.OutputLen);
             if (status != null)
             {
-                var length = status[9];
-                var start = 10;
-                var count = Math.Min(length, status.Length - start);
-                var offset = profile.GetInt("batteryOffset", 31);
-                if (count > offset && offset >= 0)
+                var index = 10 + profile.GetInt("batteryOffset", 31);
+                if (index >= 0 && index < status.Length)
                 {
-                    var raw = status[start + offset];
-                    if (raw is > 0 and <= 100)
+                    var raw = status[index];
+                    var percent = raw & 0x7F;
+                    if (percent is > 0 and <= 100)
                     {
                         // 直接使用设备上报的实际值，不做 10% 取整
                         return new BatteryReading
                         {
-                            Percent = raw,
-                            Charging = null,
-                            Source = $"QHW 0x05 · 原始 {raw}"
+                            Percent = percent,
+                            Charging = (raw & 0x80) != 0,
+                            Source = $"QHW 0x05 · 原始 {percent}"
                         };
                     }
                 }
             }
 
-            // 回退：0x03 设备信息帧
-            var info = Query(dev, 0x03, target.OutputLen);
-            if (info != null)
-            {
-                var length = info[9];
-                var start = 10;
-                var count = Math.Min(length, info.Length - start);
-                if (count > 1)
-                {
-                    var raw = info[start + 1];
-                    if (raw is > 0 and <= 100)
-                    {
-                        return new BatteryReading
-                        {
-                            Percent = raw,
-                            Charging = null,
-                            Source = $"QHW 0x03 · 原始 {raw}"
-                        };
-                    }
-                }
-            }
-
-            return BatteryReading.Fail("键盘未响应（可能处于休眠，按一下按键再刷新）");
+            // 0x05 状态帧失败通常意味着键盘切到了蓝牙模式或已关机，
+            // 不再回退 0x03（那边读到的是过期/错误值，例如 49），
+            // 让上层显示断开状态并改用蓝牙电量。
+            return BatteryReading.Fail("键盘未响应（可能已切到蓝牙模式或休眠）");
         }
         catch (Exception ex)
         {
