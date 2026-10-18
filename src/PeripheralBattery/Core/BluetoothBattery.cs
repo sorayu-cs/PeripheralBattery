@@ -22,6 +22,7 @@ public static class BluetoothBattery
 
     private static readonly Guid BatteryFmtid = new("104ea319-6ee2-4701-bd47-8ddbf425bbe5");
     private static readonly Guid NameFmtid = new("a45c254e-df1c-4efd-8020-67d146a850e0");
+    private static readonly Guid DeviceFmtid = new("83da6326-97a6-4088-9453-a1923f573b29");
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SP_DEVINFO_DATA
@@ -53,6 +54,9 @@ public static class BluetoothBattery
     [DllImport("setupapi.dll", SetLastError = true)]
     private static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
 
+    [DllImport("cfgmgr32.dll")]
+    private static extern int CM_Get_DevNode_Status(out uint status, out uint problemNumber, uint devInst, uint flags);
+
     public static List<BluetoothBatteryInfo> Discover()
     {
         var result = new List<BluetoothBatteryInfo>();
@@ -65,10 +69,19 @@ public static class BluetoothBattery
             var data = new SP_DEVINFO_DATA { cbSize = Marshal.SizeOf<SP_DEVINFO_DATA>() };
             for (uint i = 0; SetupDiEnumDeviceInfo(set, i, ref data); i++)
             {
-                // 只有上报过电量更新时间的设备才算真正连接；
-                // 配对但从未连接的设备没有 PID 7（时间）属性。
+                // 设备不在场（已断开/移出）时直接跳过
+                var present = ReadBoolean(set, ref data, DeviceFmtid, 15);
+                if (present == false) continue;
+
+                // 设备节点必须处于“已启动”状态（断开/移出的设备不会置位 DN_STARTED）
+                if (CM_Get_DevNode_Status(out var status, out _, (uint)data.DevInst, 0) != 0 ||
+                    (status & 0x8) == 0)
+                    continue;
+
+                // 只有最近上报过电量更新时间的设备才算真正连接；
+                // 配对但未连接的设备没有 PID 7（时间）属性。
                 var updated = ReadFileTime(set, ref data, BatteryFmtid, 7);
-                if (updated is null || DateTime.UtcNow - updated.Value > TimeSpan.FromMinutes(10)) continue;
+                if (updated is null || DateTime.UtcNow - updated.Value > TimeSpan.FromMinutes(1)) continue;
 
                 var percent = ReadByte(set, ref data, BatteryFmtid, 2);
                 if (percent is null or <= 0 or > 100) continue;
