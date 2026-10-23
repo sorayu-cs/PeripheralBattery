@@ -21,6 +21,8 @@ public sealed class LogitechHidppProtocol : IBatteryProtocol
 
     private (int Percent, bool Charging, int Millivolts)? _last;
     private DateTime _lastAt = DateTime.MinValue;
+    private DateTime _skipUntil = DateTime.MinValue;
+    private uint _skipInputTick;
 
     private static readonly string CachePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -28,8 +30,20 @@ public sealed class LogitechHidppProtocol : IBatteryProtocol
 
     public BatteryReading Read(DeviceProfile profile, IReadOnlyList<HidInterface> interfaces)
     {
+        // 上次查询时鼠标没有响应（休眠）：默认 5 分钟内不再发 HID++ 请求。
+        // 但如果这期间用户动过鼠标/键盘，则立刻重试，避免唤醒后还显示休眠。
+        if (DateTime.Now < _skipUntil && _last is { } skipped)
+        {
+            var currentTick = InputActivity.LastInputTick();
+            if (currentTick == 0 || currentTick <= _skipInputTick)
+                return BuildSleeping(skipped.Percent, skipped.Charging, skipped.Millivolts);
+
+            _skipUntil = DateTime.MinValue;
+        }
+
         if (ReadState(out var percent, out var millivolts, out var charging, out var error))
         {
+            _skipUntil = DateTime.MinValue;
             _last = (percent, charging, millivolts);
             _lastAt = DateTime.Now;
             SaveCache(percent, charging);
@@ -45,6 +59,9 @@ public sealed class LogitechHidppProtocol : IBatteryProtocol
 
         // 鼠标休眠时 HID++ 无响应，这是无线鼠标的常态，不算断开：
         // 沿用最后一次有效值（进程内缓存，或上次运行写下的文件缓存）。
+        _skipUntil = DateTime.Now.AddMinutes(5);
+        _skipInputTick = InputActivity.LastInputTick();
+
         if (_last is { } cached)
         {
             return BuildSleeping(cached.Percent, cached.Charging, cached.Millivolts);
@@ -119,7 +136,8 @@ public sealed class LogitechHidppProtocol : IBatteryProtocol
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
             };
 
             using var process = Process.Start(startInfo);

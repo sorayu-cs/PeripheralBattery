@@ -39,7 +39,13 @@ public sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
 
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
     {
-        e.TextColor = e.Item.Enabled ? Text : TextDisabled;
+        if (!e.Item.Enabled)
+            e.TextColor = TextDisabled;
+        else if (e.Item.ForeColor != SystemColors.ControlText)
+            e.TextColor = e.Item.ForeColor;   // 保留条目自定义颜色（如开机自启状态）
+        else
+            e.TextColor = Text;
+
         base.OnRenderItemText(e);
     }
 

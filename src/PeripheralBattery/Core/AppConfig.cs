@@ -10,6 +10,7 @@ public sealed class AppConfig
     public bool Autostart { get; set; }
     public bool StartMinimized { get; set; } = true;
     public bool ShowNotifications { get; set; } = true;
+    public bool TrayIconPinned { get; set; } = true;
     public List<DeviceProfile> Devices { get; set; } = new();
 
     [JsonIgnore]

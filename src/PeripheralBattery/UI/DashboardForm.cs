@@ -21,6 +21,8 @@ public sealed class DashboardForm : Form
     private readonly Label _subtitle;
     private readonly System.Windows.Forms.Timer _timer;
     private readonly System.Windows.Forms.Timer _chargeTimer;
+    private readonly System.Windows.Forms.Timer _inputTimer;
+    private DateTime _lastInputRefresh = DateTime.MinValue;
     private bool _busy;
     private bool _closingToTray;
     private string _lastSignature = "";
@@ -128,9 +130,21 @@ public sealed class DashboardForm : Form
         };
         ScheduleNextRefresh();
 
-        // 充电状态高频轮询：插拔线后 2 秒内切换显示
-        _chargeTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        // 充电状态轮询：60 秒一次，减少 HID++ 唤醒和指示灯闪烁
+        _chargeTimer = new System.Windows.Forms.Timer { Interval = 60000 };
         _chargeTimer.Tick += async (_, _) => await PollChargingAsync();
+
+        // 检测到用户动鼠标/按键时立即刷新，解决“唤醒后还显示休眠”
+        _inputTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        _inputTimer.Tick += async (_, _) =>
+        {
+            if (!InputActivity.HasNewInput()) return;
+            if ((DateTime.Now - _lastInputRefresh).TotalSeconds < 5) return;
+
+            _lastInputRefresh = DateTime.Now;
+            await PollChargingAsync();
+        };
+        _inputTimer.Start();
 
         Shown += (_, _) =>
         {
@@ -338,6 +352,7 @@ public sealed class DashboardForm : Form
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         _chargeTimer.Stop();
+        _inputTimer.Stop();
 
         if (!_closingToTray && e.CloseReason == CloseReason.UserClosing)
         {

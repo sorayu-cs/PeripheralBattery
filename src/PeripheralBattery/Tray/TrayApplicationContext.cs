@@ -22,6 +22,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private List<(string Name, BatteryReading Reading)> _display = new();
     private bool _refreshing;
     private bool _exiting;
+    private DateTime _lastHoverRefresh = DateTime.MinValue;
     private SettingsForm? _settings;
     private DashboardForm? _dashboard;
 
@@ -47,12 +48,16 @@ public sealed class TrayApplicationContext : ApplicationContext
         };
         _notifyIcon.MouseClick += OnIconClick;
         _notifyIcon.DoubleClick += (_, _) => OpenDashboard();
-
-        // 托盘比面板更新更勤，连接模式切换时图标能尽快跟上
-        _timer = new System.Windows.Forms.Timer
+        _notifyIcon.MouseMove += (_, _) =>
         {
-            Interval = Math.Min(Math.Max(10, _config.RefreshSeconds), 15) * 1000
+            // 鼠标悬停在图标上时立刻刷新（5 秒内不重复）
+            if ((DateTime.Now - _lastHoverRefresh).TotalSeconds < 5) return;
+            _lastHoverRefresh = DateTime.Now;
+            Refresh();
         };
+
+        // 托盘每 120 秒刷新一次，降低 HID++ 唤醒频率
+        _timer = new System.Windows.Forms.Timer { Interval = 120000 };
         _timer.Tick += (_, _) => Refresh();
         _timer.Start();
 
@@ -230,26 +235,44 @@ public sealed class TrayApplicationContext : ApplicationContext
         settings.Click += (_, _) => OpenSettings();
         _menu.Items.Add(settings);
 
-        var autostart = new ToolStripMenuItem("开机自启")
+        var autostartOn = Autostart.IsEnabled;
+        var autostart = new ToolStripMenuItem(autostartOn ? "开机自启：已开启" : "开机自启：已关闭")
         {
-            Checked = Autostart.IsEnabled,
-            CheckOnClick = true
+            ForeColor = autostartOn
+                ? Color.FromArgb(52, 211, 153)
+                : Color.FromArgb(148, 150, 158)
         };
         autostart.Click += (_, _) =>
         {
-            if (autostart.Checked)
+            if (Autostart.IsEnabled)
+            {
+                if (!Autostart.Disable(out var error)) ShowError(error);
+            }
+            else
             {
                 if (!Autostart.Enable(out var error)) ShowError(error);
-            }
-            else if (!Autostart.Disable(out var error))
-            {
-                ShowError(error);
             }
 
             _config.Autostart = Autostart.IsEnabled;
             _config.Save();
+            RebuildMenu();
         };
         _menu.Items.Add(autostart);
+
+        var traySettings = new ToolStripMenuItem("打开系统托盘设置…");
+        traySettings.Click += (_, _) =>
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                    "ms-settings:taskbar") { UseShellExecute = true });
+            }
+            catch
+            {
+                ShowError("无法打开系统设置");
+            }
+        };
+        _menu.Items.Add(traySettings);
 
         _menu.Items.Add(new ToolStripSeparator());
 
@@ -290,7 +313,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _settings.FormClosed += (_, _) =>
         {
             _settings = null;
-            _timer.Interval = Math.Min(Math.Max(10, _config.RefreshSeconds), 15) * 1000;
+            _timer.Interval = 120000;
             Refresh();
         };
         _settings.Show();

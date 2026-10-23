@@ -9,6 +9,11 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>PeripheralBattery</AssemblyName>
     <RootNamespace>PeripheralBattery</RootNamespace>
+    <AssemblyTitle>肥鱼监控</AssemblyTitle>
+    <Product>肥鱼监控</Product>
+    <Description>肥鱼监控 · 2.4G / 蓝牙外设电量</Description>
+    <Company>肥鱼监控</Company>
+    <FileDescription>肥鱼监控</FileDescription>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <InvariantGlobalization>false</InvariantGlobalization>
